@@ -1,19 +1,25 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   Biome,
   BowserFlame,
   Chunk,
+  DEFAULT_SETTINGS,
   Enemy,
   Fireball,
   FloatingText,
+  GameMode,
+  GameSettings,
   KeysState,
+  MARIO_HIGHSCORE_STORAGE_KEY,
+  MARIO_SETTINGS_STORAGE_KEY,
   Particle,
   Player,
   PowerUp,
   SCREEN_HEIGHT,
   SCREEN_WIDTH,
+  ScreenState,
   TILE_BRICK,
   TILE_CASTLE_AXE,
   TILE_CASTLE_BRIDGE,
@@ -33,14 +39,31 @@ import {
 } from './MarioTypes';
 import { generateChunk, getBiomeForChunk, pruneFarObjects } from './MarioGenerator';
 import { updateEngine } from './MarioEngine';
+import { soundEngine } from './MarioAudio';
 
 export const MarioGame: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isMobile, setIsMobile] = useState<boolean>(false);
-  const [gameTime, setGameTime] = useState<number>(400);
 
-  // Input states ref so event handlers write to it without triggering re-renders
+  // Persistence States
+  const [settings, setSettings] = useState<GameSettings>(DEFAULT_SETTINGS);
+  const [highScore, setHighScore] = useState<number>(0);
+
+  // Game Flow States
+  const [screenState, setScreenState] = useState<ScreenState>('menu');
+  const [gameMode, setGameMode] = useState<GameMode>('classic');
+  const [isMobile, setIsMobile] = useState<boolean>(false);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  // HUD & Stats
+  const [gameTime, setGameTime] = useState<number>(400);
+  const [fps, setFps] = useState<number>(60);
+  const [stageIntroTimer, setStageIntroTimer] = useState<number>(2);
+
+  // Key remapping state
+  const [remappingAction, setRemappingAction] = useState<keyof GameSettings['controls'] | null>(null);
+
+  // Active Keys state ref
   const keysRef = useRef<KeysState>({
     left: false,
     right: false,
@@ -50,40 +73,35 @@ export const MarioGame: React.FC = () => {
     fire: false,
   });
 
-  // Touch control handlers
-  const setKey = (key: keyof KeysState, active: boolean) => {
-    keysRef.current[key] = active;
-    if (active && key === 'run') {
-      keysRef.current.fire = true;
-    }
-  };
+  // Game Loop Ref variables
+  const gameStateRef = useRef<{
+    player: Player;
+    cameraX: number;
+    chunks: Map<number, Chunk>;
+    enemies: Enemy[];
+    powerUps: PowerUp[];
+    fireballs: Fireball[];
+    bowserFlames: BowserFlame[];
+    particles: Particle[];
+    floatingTexts: FloatingText[];
+    highestGeneratedChunk: number;
+    gameMode: GameMode;
+  }>({
+    player: createInitialPlayer(),
+    cameraX: 0,
+    chunks: new Map(),
+    enemies: [],
+    powerUps: [],
+    fireballs: [],
+    bowserFlames: [],
+    particles: [],
+    floatingTexts: [],
+    highestGeneratedChunk: 3,
+    gameMode: 'classic',
+  });
 
-  useEffect(() => {
-    // Mobile touch detection
-    const checkMobile = () => {
-      setIsMobile(
-        'ontouchstart' in window ||
-          navigator.maxTouchPoints > 0 ||
-          window.innerWidth <= 768
-      );
-    };
-    checkMobile();
-    window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
-  }, []);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Fixed internal resolution canvas scaling setup
-    canvas.width = SCREEN_WIDTH;
-    canvas.height = SCREEN_HEIGHT;
-
-    // Game Engine State Initialization
-    const player: Player = {
+  function createInitialPlayer(): Player {
+    return {
       x: 32,
       y: 176,
       vx: 0,
@@ -105,45 +123,201 @@ export const MarioGame: React.FC = () => {
       animFrame: 0,
       animTimer: 0,
     };
+  }
 
-    let cameraX = 0;
+  // Load Settings and High Score from LocalStorage
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    try {
+      const savedSettings = localStorage.getItem(MARIO_SETTINGS_STORAGE_KEY);
+      if (savedSettings) {
+        setSettings(JSON.parse(savedSettings));
+      }
+      const savedHighScore = localStorage.getItem(MARIO_HIGHSCORE_STORAGE_KEY);
+      if (savedHighScore) {
+        setHighScore(parseInt(savedHighScore, 10) || 0);
+      }
+    } catch (e) {
+      console.error('Failed to load settings from localStorage', e);
+    }
+
+    const checkMobile = () => {
+      setIsMobile(
+        'ontouchstart' in window ||
+          navigator.maxTouchPoints > 0 ||
+          window.innerWidth <= 768
+      );
+    };
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+
+    const handleFSChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFSChange);
+
+    return () => {
+      window.removeEventListener('resize', checkMobile);
+      document.removeEventListener('fullscreenchange', handleFSChange);
+    };
+  }, []);
+
+  // Update sound engine volumes whenever settings change
+  useEffect(() => {
+    soundEngine.setVolumes({
+      masterVolume: settings.masterVolume,
+      musicVolume: settings.musicVolume,
+      sfxVolume: settings.sfxVolume,
+      muted: settings.muted,
+    });
+    // Persist settings
+    try {
+      localStorage.setItem(MARIO_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    } catch (e) {
+      console.error('Failed to save settings', e);
+    }
+  }, [settings]);
+
+  // Save High Score
+  const checkAndSaveHighScore = useCallback((score: number) => {
+    setHighScore((prev) => {
+      if (score > prev) {
+        try {
+          localStorage.setItem(MARIO_HIGHSCORE_STORAGE_KEY, score.toString());
+        } catch (e) {
+          console.error('Failed to save high score', e);
+        }
+        return score;
+      }
+      return prev;
+    });
+  }, []);
+
+  // Native Fullscreen API
+  const toggleFullscreen = () => {
+    soundEngine.initAudio();
+    if (!containerRef.current) return;
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().catch((err) => console.error(err));
+    } else {
+      document.exitFullscreen().catch((err) => console.error(err));
+    }
+  };
+
+  // Start new game session
+  const startNewGame = (mode: GameMode) => {
+    soundEngine.initAudio();
+    setGameMode(mode);
+    setGameTime(400);
+
+    const newPlayer = createInitialPlayer();
     const chunks = new Map<number, Chunk>();
-    let enemies: Enemy[] = [];
-    let powerUps: PowerUp[] = [];
-    const fireballs: Fireball[] = [];
-    const bowserFlames: BowserFlame[] = [];
-    const particles: Particle[] = [];
-    const floatingTexts: FloatingText[] = [];
+    const enemies: Enemy[] = [];
 
-    // Pre-generate initial 4 chunks (0, 1, 2, 3)
+    // Pre-generate 4 chunks
     for (let c = 0; c < 4; c++) {
       const data = generateChunk(c);
       chunks.set(c, data.chunk);
       enemies.push(...data.enemies);
     }
 
-    let highestGeneratedChunk = 3;
+    gameStateRef.current = {
+      player: newPlayer,
+      cameraX: 0,
+      chunks,
+      enemies,
+      powerUps: [],
+      fireballs: [],
+      bowserFlames: [],
+      particles: [],
+      floatingTexts: [],
+      highestGeneratedChunk: 3,
+      gameMode: mode,
+    };
 
-    // Keydown / Keyup Listeners
+    setStageIntroTimer(2);
+    setScreenState('stage_intro');
+  };
+
+  // Stage Intro countdown effect
+  useEffect(() => {
+    if (screenState !== 'stage_intro') return;
+    soundEngine.stopBGM();
+
+    const interval = setInterval(() => {
+      setStageIntroTimer((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          setScreenState('playing');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [screenState]);
+
+  // Keyboard Event Handlers
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const code = e.code;
-      if (code === 'ArrowLeft' || code === 'KeyA') keysRef.current.left = true;
-      if (code === 'ArrowRight' || code === 'KeyD') keysRef.current.right = true;
-      if (code === 'ArrowDown' || code === 'KeyS') keysRef.current.down = true;
-      if (code === 'ArrowUp' || code === 'KeyW' || code === 'Space') keysRef.current.jump = true;
-      if (code === 'ShiftLeft' || code === 'ShiftRight' || code === 'KeyK') {
+      soundEngine.initAudio();
+
+      // If key remapping in progress
+      if (remappingAction) {
+        e.preventDefault();
+        setSettings((prev) => ({
+          ...prev,
+          controls: {
+            ...prev.controls,
+            [remappingAction]: [e.code],
+          },
+        }));
+        setRemappingAction(null);
+        return;
+      }
+
+      const ctrl = settings.controls;
+
+      // Fullscreen key
+      if (ctrl.fullscreen.includes(e.code)) {
+        e.preventDefault();
+        toggleFullscreen();
+        return;
+      }
+
+      // Pause key
+      if (ctrl.pause.includes(e.code)) {
+        e.preventDefault();
+        if (screenState === 'playing') {
+          soundEngine.playPause();
+          soundEngine.stopBGM();
+          setScreenState('paused');
+        } else if (screenState === 'paused') {
+          soundEngine.playPause();
+          setScreenState('playing');
+        }
+        return;
+      }
+
+      if (ctrl.left.includes(e.code)) keysRef.current.left = true;
+      if (ctrl.right.includes(e.code)) keysRef.current.right = true;
+      if (ctrl.down.includes(e.code)) keysRef.current.down = true;
+      if (ctrl.jump.includes(e.code)) keysRef.current.jump = true;
+      if (ctrl.run.includes(e.code)) {
         keysRef.current.run = true;
         keysRef.current.fire = true;
       }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      const code = e.code;
-      if (code === 'ArrowLeft' || code === 'KeyA') keysRef.current.left = false;
-      if (code === 'ArrowRight' || code === 'KeyD') keysRef.current.right = false;
-      if (code === 'ArrowDown' || code === 'KeyS') keysRef.current.down = false;
-      if (code === 'ArrowUp' || code === 'KeyW' || code === 'Space') keysRef.current.jump = false;
-      if (code === 'ShiftLeft' || code === 'ShiftRight' || code === 'KeyK') {
+      const ctrl = settings.controls;
+      if (ctrl.left.includes(e.code)) keysRef.current.left = false;
+      if (ctrl.right.includes(e.code)) keysRef.current.right = false;
+      if (ctrl.down.includes(e.code)) keysRef.current.down = false;
+      if (ctrl.jump.includes(e.code)) keysRef.current.jump = false;
+      if (ctrl.run.includes(e.code)) {
         keysRef.current.run = false;
         keysRef.current.fire = false;
       }
@@ -151,106 +325,183 @@ export const MarioGame: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
-
-    // Main Game Loop Variables
-    let lastTime = performance.now();
-    let requestRef: number;
-    let timerCounter = 0;
-
-    const gameLoop = (now: number) => {
-      const dt = now - lastTime;
-      lastTime = now;
-
-      // Update timer countdown
-      timerCounter += dt;
-      if (timerCounter >= 1000) {
-        timerCounter -= 1000;
-        setGameTime((prev) => Math.max(0, prev - 1));
-      }
-
-      // Check if we need to generate new chunks ahead of Mario
-      const currentMarioChunk = Math.floor(player.x / (16 * TILE_SIZE));
-      while (highestGeneratedChunk < currentMarioChunk + 4) {
-        highestGeneratedChunk++;
-        const data = generateChunk(highestGeneratedChunk);
-        chunks.set(highestGeneratedChunk, data.chunk);
-        enemies.push(...data.enemies);
-      }
-
-      // Run Engine Update
-      const res = updateEngine(
-        dt,
-        player,
-        keysRef.current,
-        chunks,
-        enemies,
-        powerUps,
-        fireballs,
-        bowserFlames,
-        particles,
-        floatingTexts,
-        cameraX
-      );
-      cameraX = res.cameraX;
-
-      // Reset Player on Death & Respawn
-      if (player.dead && player.deathTimer <= 0) {
-        if (player.lives > 0) {
-          // Respawn at current camera start
-          player.dead = false;
-          player.x = cameraX + 32;
-          player.y = 176;
-          player.vx = 0;
-          player.vy = 0;
-          player.state = 'small';
-          player.iframeTimer = 2000;
-        } else {
-          // Reset Game
-          player.lives = 3;
-          player.score = 0;
-          player.coins = 0;
-          player.distance = 32;
-          player.x = 32;
-          player.y = 176;
-          player.vx = 0;
-          player.vy = 0;
-          player.dead = false;
-          player.state = 'small';
-          cameraX = 0;
-          chunks.clear();
-          enemies = [];
-          powerUps = [];
-          for (let c = 0; c < 4; c++) {
-            const data = generateChunk(c);
-            chunks.set(c, data.chunk);
-            enemies.push(...data.enemies);
-          }
-          highestGeneratedChunk = 3;
-          setGameTime(400);
-        }
-      }
-
-      // Run Memory Pruning
-      const pruned = pruneFarObjects(chunks, enemies, powerUps, cameraX);
-      enemies = pruned.enemies;
-      powerUps = pruned.powerUps;
-
-      // Render Everything
-      render(ctx, player, cameraX, chunks, enemies, powerUps, fireballs, bowserFlames, particles, floatingTexts);
-
-      requestRef = requestAnimationFrame(gameLoop);
-    };
-
-    requestRef = requestAnimationFrame(gameLoop);
-
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
-      cancelAnimationFrame(requestRef);
     };
-  }, []);
+  }, [settings.controls, screenState, remappingAction]);
 
-  // --- RENDERING FUNCTIONS ---
+  // Touch control helper
+  const setVirtualKey = (key: keyof KeysState, active: boolean) => {
+    soundEngine.initAudio();
+    keysRef.current[key] = active;
+    if (active && key === 'run') {
+      keysRef.current.fire = true;
+    }
+  };
+
+  // Main Canvas Render & Fixed Loop
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    canvas.width = SCREEN_WIDTH;
+    canvas.height = SCREEN_HEIGHT;
+
+    let requestRef: number;
+    let lastTime = performance.now();
+    let frameCounter = 0;
+    let fpsTimeCounter = 0;
+    let timerCounter = 0;
+
+    const loop = (now: number) => {
+      const dt = now - lastTime;
+      lastTime = now;
+
+      // FPS Calculation
+      frameCounter++;
+      fpsTimeCounter += dt;
+      if (fpsTimeCounter >= 1000) {
+        setFps(frameCounter);
+        frameCounter = 0;
+        fpsTimeCounter = 0;
+      }
+
+      if (screenState === 'playing') {
+        const state = gameStateRef.current;
+
+        // Game Timer Countdown
+        timerCounter += dt;
+        if (timerCounter >= 1000) {
+          timerCounter -= 1000;
+          setGameTime((prev) => {
+            if (prev <= 1) {
+              // Time's up -> kill player
+              state.player.dead = true;
+              state.player.deathTimer = 2000;
+              state.player.vy = -0.3;
+              state.player.lives -= 1;
+              soundEngine.playJingle('death');
+              return 0;
+            }
+            return prev - 1;
+          });
+        }
+
+        // Generate chunk ahead
+        const currentMarioChunk = Math.floor(state.player.x / (16 * TILE_SIZE));
+        while (state.highestGeneratedChunk < currentMarioChunk + 4) {
+          state.highestGeneratedChunk++;
+          const data = generateChunk(state.highestGeneratedChunk);
+          state.chunks.set(state.highestGeneratedChunk, data.chunk);
+          state.enemies.push(...data.enemies);
+        }
+
+        // Update Physics Engine
+        const res = updateEngine(
+          dt,
+          state.player,
+          keysRef.current,
+          state.chunks,
+          state.enemies,
+          state.powerUps,
+          state.fireballs,
+          state.bowserFlames,
+          state.particles,
+          state.floatingTexts,
+          state.cameraX
+        );
+        state.cameraX = res.cameraX;
+
+        // Check High Score
+        checkAndSaveHighScore(state.player.score);
+
+        // Stage Clear Handling
+        if (res.stageCleared) {
+          soundEngine.stopBGM();
+          soundEngine.playJingle('level_clear', () => {
+            // Next stage / victory restart
+            startNewGame(gameMode);
+          });
+        }
+
+        // Death & Respawn / Game Over
+        if (state.player.dead && state.player.deathTimer <= 0) {
+          if (state.player.lives > 0) {
+            // Respawn
+            state.player.dead = false;
+            state.player.x = state.cameraX + 32;
+            state.player.y = 176;
+            state.player.vx = 0;
+            state.player.vy = 0;
+            state.player.state = 'small';
+            state.player.iframeTimer = 2000;
+            setGameTime(400);
+            setStageIntroTimer(2);
+            setScreenState('stage_intro');
+          } else {
+            // Game Over
+            soundEngine.stopBGM();
+            soundEngine.playJingle('game_over');
+            setScreenState('game_over');
+          }
+        }
+
+        // Memory Pruning
+        const pruned = pruneFarObjects(
+          state.chunks,
+          state.enemies,
+          state.powerUps,
+          state.cameraX
+        );
+        state.enemies = pruned.enemies;
+        state.powerUps = pruned.powerUps;
+
+        // Render Frame
+        render(
+          ctx,
+          state.player,
+          state.cameraX,
+          state.chunks,
+          state.enemies,
+          state.powerUps,
+          state.fireballs,
+          state.bowserFlames,
+          state.particles,
+          state.floatingTexts,
+          res.currentBiome,
+          gameTime,
+          settings.showFPS ? fps : undefined
+        );
+      } else {
+        // Render menu or static background preview when paused
+        const state = gameStateRef.current;
+        render(
+          ctx,
+          state.player,
+          state.cameraX,
+          state.chunks,
+          state.enemies,
+          state.powerUps,
+          state.fireballs,
+          state.bowserFlames,
+          state.particles,
+          state.floatingTexts,
+          'overworld',
+          gameTime
+        );
+      }
+
+      requestRef = requestAnimationFrame(loop);
+    };
+
+    requestRef = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(requestRef);
+  }, [screenState, gameTime, settings.showFPS, gameMode, checkAndSaveHighScore]);
+
+  // RENDER CANVAS FUNCTIONS
   const render = (
     ctx: CanvasRenderingContext2D,
     player: Player,
@@ -261,54 +512,53 @@ export const MarioGame: React.FC = () => {
     fireballs: Fireball[],
     bowserFlames: BowserFlame[],
     particles: Particle[],
-    floatingTexts: FloatingText[]
+    floatingTexts: FloatingText[],
+    biome: Biome,
+    timeRemaining: number,
+    fpsValue?: number
   ) => {
     ctx.imageSmoothingEnabled = false;
 
-    // Determine current background sky color based on camera position biome
-    const currentChunkIndex = Math.floor(cameraX / (16 * TILE_SIZE));
-    const currentBiome = getBiomeForChunk(currentChunkIndex);
-
-    let skyColor = '#5c94fc'; // Overworld blue
-    if (currentBiome === 'underground') skyColor = '#000000';
-    if (currentBiome === 'castle') skyColor = '#000000';
-
+    // Sky Background
+    let skyColor = '#5c94fc';
+    if (biome === 'underground' || biome === 'castle') skyColor = '#000000';
     ctx.fillStyle = skyColor;
     ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    // Draw Background Elements (Clouds / Castle Walls)
-    if (currentBiome === 'overworld') {
-      drawParallaxClouds(ctx, cameraX);
+    // Parallax Clouds in Overworld
+    if (biome === 'overworld') {
+      ctx.fillStyle = '#ffffff';
+      const cloud1X = (50 - cameraX * 0.3) % 400;
+      ctx.fillRect(cloud1X, 30, 32, 12);
+      ctx.fillRect(cloud1X + 8, 22, 16, 8);
+
+      const cloud2X = (220 - cameraX * 0.3) % 400;
+      ctx.fillRect(cloud2X, 50, 48, 14);
+      ctx.fillRect(cloud2X + 12, 40, 24, 10);
     }
 
-    // Render Chunks & Tiles
+    // Chunks & Tiles
     chunks.forEach((chunk) => {
       const chunkX = chunk.startX - cameraX;
-      if (chunkX + 256 < 0 || chunkX > SCREEN_WIDTH) return; // culling
+      if (chunkX + 256 < 0 || chunkX > SCREEN_WIDTH) return;
 
       for (let r = 0; r < 15; r++) {
         for (let c = 0; c < 16; c++) {
           const tile = chunk.tiles[r][c];
           if (tile !== 0) {
-            const tx = chunkX + c * TILE_SIZE;
-            const ty = r * TILE_SIZE;
-            drawTile(ctx, tile, tx, ty, chunk.biome);
+            drawTile(ctx, tile, chunkX + c * TILE_SIZE, r * TILE_SIZE, chunk.biome);
           }
         }
       }
     });
 
-    // Render Power-Ups
+    // Entities
     powerUps.forEach((p) => drawPowerUp(ctx, p, cameraX));
-
-    // Render Enemies
     enemies.forEach((e) => drawEnemy(ctx, e, cameraX));
-
-    // Render Fireballs & Bowser Flames
     fireballs.forEach((fb) => drawFireball(ctx, fb, cameraX));
     bowserFlames.forEach((bf) => drawBowserFlame(ctx, bf, cameraX));
 
-    // Render Particles & Floating Texts
+    // Particles & Floating Text
     particles.forEach((pt) => {
       ctx.fillStyle = pt.color;
       ctx.fillRect(pt.x - cameraX, pt.y, pt.size, pt.size);
@@ -320,22 +570,11 @@ export const MarioGame: React.FC = () => {
       ctx.fillText(ft.text, ft.x - cameraX, ft.y);
     });
 
-    // Render Player
+    // Player
     drawPlayer(ctx, player, cameraX);
 
-    // Render NES HUD
-    drawHUD(ctx, player, currentBiome);
-  };
-
-  const drawParallaxClouds = (ctx: CanvasRenderingContext2D, cameraX: number) => {
-    ctx.fillStyle = '#ffffff';
-    const cloud1X = (50 - cameraX * 0.3) % 400;
-    ctx.fillRect(cloud1X, 30, 32, 12);
-    ctx.fillRect(cloud1X + 8, 22, 16, 8);
-
-    const cloud2X = (220 - cameraX * 0.3) % 400;
-    ctx.fillRect(cloud2X, 50, 48, 14);
-    ctx.fillRect(cloud2X + 12, 40, 24, 10);
+    // NES HUD
+    drawHUD(ctx, player, biome, timeRemaining, fpsValue);
   };
 
   const drawTile = (
@@ -350,15 +589,6 @@ export const MarioGame: React.FC = () => {
 
     switch (type) {
       case TILE_GROUND:
-        ctx.fillStyle = biome === 'underground' ? '#008888' : '#c84c0c';
-        ctx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, TILE_SIZE, 1);
-        ctx.fillRect(0, 8, TILE_SIZE, 1);
-        ctx.fillRect(8, 0, 1, 8);
-        ctx.fillRect(4, 8, 1, 8);
-        break;
-
       case TILE_BRICK:
         ctx.fillStyle = biome === 'underground' ? '#008888' : '#c84c0c';
         ctx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
@@ -367,7 +597,6 @@ export const MarioGame: React.FC = () => {
         ctx.fillRect(0, 8, TILE_SIZE, 1);
         ctx.fillRect(8, 0, 1, 8);
         ctx.fillRect(4, 8, 1, 8);
-        ctx.fillRect(12, 8, 1, 8);
         break;
 
       case TILE_QUESTION_COIN:
@@ -377,7 +606,7 @@ export const MarioGame: React.FC = () => {
         ctx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
         ctx.fillStyle = '#000000';
         ctx.strokeRect(0, 0, TILE_SIZE, TILE_SIZE);
-        ctx.fillStyle = '#c84c0c'; // ? mark
+        ctx.fillStyle = '#c84c0c';
         ctx.fillRect(6, 3, 4, 2);
         ctx.fillRect(8, 5, 2, 3);
         ctx.fillRect(6, 8, 4, 2);
@@ -461,7 +690,6 @@ export const MarioGame: React.FC = () => {
   };
 
   const drawPlayer = (ctx: CanvasRenderingContext2D, player: Player, cameraX: number) => {
-    // Flashing iframe / star effect
     if (player.iframeTimer > 0 && Math.floor(player.iframeTimer / 50) % 2 === 0) {
       return;
     }
@@ -477,7 +705,6 @@ export const MarioGame: React.FC = () => {
     }
     ctx.translate(-player.width / 2, 0);
 
-    // Color Palette based on State
     let hatShirtColor = '#ff0000';
     let overallsColor = '#0000ff';
 
@@ -492,33 +719,31 @@ export const MarioGame: React.FC = () => {
     }
 
     if (player.state === 'small') {
-      // Small Mario Sprite (12x16)
       ctx.fillStyle = hatShirtColor;
-      ctx.fillRect(2, 0, 8, 3); // hat
-      ctx.fillRect(0, 3, 12, 1); // brim
-      ctx.fillRect(2, 7, 8, 5); // shirt
+      ctx.fillRect(2, 0, 8, 3);
+      ctx.fillRect(0, 3, 12, 1);
+      ctx.fillRect(2, 7, 8, 5);
 
-      ctx.fillStyle = '#ffcc99'; // skin
+      ctx.fillStyle = '#ffcc99';
       ctx.fillRect(2, 4, 8, 3);
-      ctx.fillRect(0, 8, 3, 3); // hand L
-      ctx.fillRect(9, 8, 3, 3); // hand R
+      ctx.fillRect(0, 8, 3, 3);
+      ctx.fillRect(9, 8, 3, 3);
 
       ctx.fillStyle = overallsColor;
       ctx.fillRect(4, 9, 4, 5);
       ctx.fillRect(2, 12, 2, 4);
       ctx.fillRect(8, 12, 2, 4);
 
-      ctx.fillStyle = '#8b4513'; // boots
+      ctx.fillStyle = '#8b4513';
       ctx.fillRect(0, 14, 4, 2);
       ctx.fillRect(8, 14, 4, 2);
     } else {
-      // Super / Fire Mario Sprite (12x28)
       ctx.fillStyle = hatShirtColor;
-      ctx.fillRect(2, 0, 8, 4); // hat
-      ctx.fillRect(0, 4, 12, 2); // brim
-      ctx.fillRect(2, 10, 8, 10); // shirt
+      ctx.fillRect(2, 0, 8, 4);
+      ctx.fillRect(0, 4, 12, 2);
+      ctx.fillRect(2, 10, 8, 10);
 
-      ctx.fillStyle = '#ffcc99'; // skin
+      ctx.fillStyle = '#ffcc99';
       ctx.fillRect(2, 6, 8, 4);
       ctx.fillRect(0, 12, 3, 4);
       ctx.fillRect(9, 12, 3, 4);
@@ -528,7 +753,7 @@ export const MarioGame: React.FC = () => {
       ctx.fillRect(1, 22, 4, 6);
       ctx.fillRect(7, 22, 4, 6);
 
-      ctx.fillStyle = '#8b4513'; // boots
+      ctx.fillStyle = '#8b4513';
       ctx.fillRect(0, 26, 5, 2);
       ctx.fillRect(7, 26, 5, 2);
     }
@@ -569,8 +794,8 @@ export const MarioGame: React.FC = () => {
           ctx.fillStyle = '#ffffff';
           ctx.fillRect(4, 8, 4, 4);
         } else {
-          ctx.fillRect(4, 0, 8, 6); // head
-          ctx.fillRect(2, 6, 12, 10); // shell
+          ctx.fillRect(4, 0, 8, 6);
+          ctx.fillRect(2, 6, 12, 10);
         }
         break;
 
@@ -578,14 +803,14 @@ export const MarioGame: React.FC = () => {
         ctx.fillStyle = '#d82800';
         ctx.fillRect(2, 0, 12, 16);
         ctx.fillStyle = '#ffffff';
-        ctx.fillRect(4, 4, 2, 4); // teeth
+        ctx.fillRect(4, 4, 2, 4);
         ctx.fillRect(10, 4, 2, 4);
         break;
 
       case 'spiny':
         ctx.fillStyle = '#d82800';
         ctx.fillRect(2, 4, 12, 12);
-        ctx.fillStyle = '#ffffff'; // spikes
+        ctx.fillStyle = '#ffffff';
         ctx.fillRect(4, 0, 2, 4);
         ctx.fillRect(10, 0, 2, 4);
         break;
@@ -596,16 +821,16 @@ export const MarioGame: React.FC = () => {
         break;
 
       case 'lakitu':
-        ctx.fillStyle = '#ffffff'; // cloud
+        ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 12, 16, 12);
-        ctx.fillStyle = '#00a800'; // lakitu
+        ctx.fillStyle = '#00a800';
         ctx.fillRect(4, 2, 8, 10);
         break;
 
       case 'bowser':
         ctx.fillStyle = '#00a800';
         ctx.fillRect(0, 0, 32, 32);
-        ctx.fillStyle = '#d82800'; // hair/spikes
+        ctx.fillStyle = '#d82800';
         ctx.fillRect(4, 0, 8, 8);
         ctx.fillRect(20, 4, 8, 8);
         break;
@@ -646,11 +871,7 @@ export const MarioGame: React.FC = () => {
     ctx.fillRect(fb.x - cameraX, fb.y, 8, 8);
   };
 
-  const drawBowserFlame = (
-    ctx: CanvasRenderingContext2D,
-    bf: BowserFlame,
-    cameraX: number
-  ) => {
+  const drawBowserFlame = (ctx: CanvasRenderingContext2D, bf: BowserFlame, cameraX: number) => {
     ctx.fillStyle = '#d82800';
     ctx.fillRect(bf.x - cameraX, bf.y, 24, 12);
     ctx.fillStyle = '#f8b800';
@@ -660,95 +881,451 @@ export const MarioGame: React.FC = () => {
   const drawHUD = (
     ctx: CanvasRenderingContext2D,
     player: Player,
-    biome: Biome
+    biome: Biome,
+    timeRemaining: number,
+    fpsVal?: number
   ) => {
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 9px monospace';
 
     // Line 1 Labels
-    ctx.fillText('MARIO', 16, 14);
-    ctx.fillText('WORLD', 110, 14);
-    ctx.fillText('TIME', 180, 14);
-    ctx.fillText('LIVES', 220, 14);
+    ctx.fillText('MARIO', 12, 14);
+    ctx.fillText('WORLD', 105, 14);
+    ctx.fillText('TIME', 170, 14);
+    ctx.fillText('LIVES', 215, 14);
 
     // Line 2 Values
     const scoreStr = player.score.toString().padStart(6, '0');
     const coinsStr = `$x${player.coins.toString().padStart(2, '0')}`;
     const worldStr = biome === 'overworld' ? '1-1' : biome === 'underground' ? '1-2' : '1-4';
 
-    ctx.fillText(scoreStr, 16, 24);
-    ctx.fillText(coinsStr, 70, 24);
-    ctx.fillText(worldStr, 115, 24);
-    ctx.fillText(gameTime.toString().padStart(3, '0'), 183, 24);
-    ctx.fillText(`x${player.lives}`, 225, 24);
+    ctx.fillText(scoreStr, 12, 24);
+    ctx.fillText(coinsStr, 65, 24);
+    ctx.fillText(worldStr, 110, 24);
+    ctx.fillText(timeRemaining.toString().padStart(3, '0'), 173, 24);
+    ctx.fillText(`x${player.lives}`, 220, 24);
+
+    if (fpsVal !== undefined) {
+      ctx.fillStyle = '#00ff00';
+      ctx.fillText(`${fpsVal} FPS`, 210, 232);
+    }
   };
+
+  // Dynamic aspect ratio container styling
+  const getContainerAspectClass = () => {
+    if (settings.aspectRatio === '16_9') return 'aspect-[16/9]';
+    if (settings.aspectRatio === '4_3') return 'aspect-[4/3]';
+    return 'w-full h-full max-h-screen aspect-[4/3]';
+  };
+
+  const showTouch =
+    settings.touchControls === 'always' ||
+    (settings.touchControls === 'auto' && isMobile);
 
   return (
     <div
       ref={containerRef}
-      className="relative flex flex-col items-center justify-center w-full h-full min-h-screen bg-black select-none overflow-hidden"
+      className="relative flex flex-col items-center justify-center w-full h-full min-h-screen bg-black text-white select-none overflow-hidden font-mono"
     >
-      {/* Dynamic Responsive Canvas Container keeping 4:3 NES Aspect Ratio */}
-      <div className="relative w-full max-w-4xl aspect-[4/3] flex items-center justify-center bg-black shadow-2xl border-4 border-gray-800 rounded-lg overflow-hidden">
+      {/* Aspect-Ratio Adaptive Canvas Wrapper with Letterboxing */}
+      <div
+        className={`relative flex items-center justify-center bg-black shadow-2xl border-2 border-gray-800 rounded-lg overflow-hidden max-w-6xl w-full ${getContainerAspectClass()}`}
+      >
+        {/* Canvas Element */}
         <canvas
           ref={canvasRef}
           className="w-full h-full object-contain"
           style={{ imageRendering: 'pixelated' }}
         />
+
+        {/* CRT Scanline Filter Overlay */}
+        {settings.crtFilter && (
+          <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,_rgba(0,0,0,0.25)_50%)] bg-[length:100%_4px] pointer-events-none z-10 opacity-70" />
+        )}
+
+        {/* --- RETRO MAIN MENU OVERLAY --- */}
+        {screenState === 'menu' && (
+          <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center p-6 z-20 text-center">
+            {/* Animated Title Logo */}
+            <div className="mb-8 transform hover:scale-105 transition-transform">
+              <h1 className="text-4xl sm:text-6xl font-black tracking-widest text-red-600 drop-shadow-[0_4px_0_rgba(255,255,255,0.8)] animate-pulse">
+                SUPER MARIO
+              </h1>
+              <p className="text-yellow-400 text-sm sm:text-lg tracking-wider font-bold mt-2">
+                RETRO BROS EDITION
+              </p>
+            </div>
+
+            {/* High Score Banner */}
+            <div className="mb-6 bg-yellow-500/20 text-yellow-300 border border-yellow-500/50 px-4 py-1.5 rounded-full text-xs sm:text-sm font-bold tracking-wider">
+              HIGH SCORE - {highScore.toString().padStart(6, '0')}
+            </div>
+
+            {/* Mode Selector Buttons */}
+            <div className="flex flex-col space-y-3 w-64">
+              <button
+                onClick={() => startNewGame('classic')}
+                className="w-full bg-red-600 hover:bg-red-500 active:bg-red-700 text-white py-3 rounded-lg font-bold tracking-widest shadow-lg border-b-4 border-red-800 transition"
+              >
+                1 PLAYER GAME
+              </button>
+              <button
+                onClick={() => startNewGame('endless')}
+                className="w-full bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white py-3 rounded-lg font-bold tracking-widest shadow-lg border-b-4 border-emerald-800 transition"
+              >
+                ENDLESS RUNNER
+              </button>
+              <button
+                onClick={() => setScreenState('settings')}
+                className="w-full bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white py-3 rounded-lg font-bold tracking-widest shadow-lg border-b-4 border-blue-800 transition"
+              >
+                SETTINGS
+              </button>
+              <button
+                onClick={() => setScreenState('controls')}
+                className="w-full bg-gray-700 hover:bg-gray-600 active:bg-gray-800 text-white py-3 rounded-lg font-bold tracking-widest shadow-lg border-b-4 border-gray-900 transition"
+              >
+                CONTROLS
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* --- STAGE INTRO SCREEN --- */}
+        {screenState === 'stage_intro' && (
+          <div className="absolute inset-0 bg-black flex flex-col items-center justify-center z-20 space-y-4">
+            <h2 className="text-yellow-400 text-2xl font-bold tracking-widest">
+              {gameMode === 'classic' ? 'WORLD 1-1' : 'ENDLESS RUNNER'}
+            </h2>
+            <div className="flex items-center space-x-3 text-xl font-bold">
+              <span className="text-red-500">MARIO</span>
+              <span>x</span>
+              <span>{gameStateRef.current.player.lives}</span>
+            </div>
+          </div>
+        )}
+
+        {/* --- PAUSE MENU OVERLAY --- */}
+        {screenState === 'paused' && (
+          <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center p-6 z-20">
+            <h2 className="text-3xl font-bold text-yellow-400 mb-6 tracking-widest animate-bounce">
+              PAUSED
+            </h2>
+            <div className="flex flex-col space-y-3 w-56">
+              <button
+                onClick={() => setScreenState('playing')}
+                className="w-full bg-green-600 hover:bg-green-500 text-white py-2.5 rounded font-bold shadow transition"
+              >
+                RESUME
+              </button>
+              <button
+                onClick={() => setScreenState('settings')}
+                className="w-full bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded font-bold shadow transition"
+              >
+                SETTINGS
+              </button>
+              <button
+                onClick={() => startNewGame(gameMode)}
+                className="w-full bg-yellow-600 hover:bg-yellow-500 text-white py-2.5 rounded font-bold shadow transition"
+              >
+                RESTART
+              </button>
+              <button
+                onClick={() => {
+                  soundEngine.stopBGM();
+                  setScreenState('menu');
+                }}
+                className="w-full bg-red-600 hover:bg-red-500 text-white py-2.5 rounded font-bold shadow transition"
+              >
+                QUIT TO MENU
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* --- GAME OVER SCREEN --- */}
+        {screenState === 'game_over' && (
+          <div className="absolute inset-0 bg-black flex flex-col items-center justify-center p-6 z-20 space-y-6">
+            <h1 className="text-4xl sm:text-5xl font-black text-red-600 tracking-widest animate-pulse">
+              GAME OVER
+            </h1>
+            <p className="text-yellow-400 text-lg font-bold">
+              FINAL SCORE: {gameStateRef.current.player.score}
+            </p>
+            <div className="flex space-x-4">
+              <button
+                onClick={() => startNewGame(gameMode)}
+                className="bg-green-600 hover:bg-green-500 text-white px-6 py-2.5 rounded font-bold shadow transition"
+              >
+                TRY AGAIN
+              </button>
+              <button
+                onClick={() => setScreenState('menu')}
+                className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-2.5 rounded font-bold shadow transition"
+              >
+                MAIN MENU
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* --- SETTINGS PANEL --- */}
+        {screenState === 'settings' && (
+          <div className="absolute inset-0 bg-gray-950/95 flex flex-col items-center justify-center p-6 z-30 max-w-lg mx-auto w-full overflow-y-auto">
+            <h2 className="text-2xl font-bold text-yellow-400 mb-6 tracking-wider">
+              SETTINGS
+            </h2>
+
+            <div className="w-full space-y-5 text-sm">
+              {/* Audio Section */}
+              <div className="bg-gray-900 p-4 rounded-lg border border-gray-800 space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-gray-300">Master Volume</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={settings.masterVolume}
+                    onChange={(e) =>
+                      setSettings({ ...settings, masterVolume: parseFloat(e.target.value) })
+                    }
+                    className="w-32 accent-red-500"
+                  />
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-gray-300">Music Volume (BGM)</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={settings.musicVolume}
+                    onChange={(e) =>
+                      setSettings({ ...settings, musicVolume: parseFloat(e.target.value) })
+                    }
+                    className="w-32 accent-red-500"
+                  />
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-gray-300">SFX Volume</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={settings.sfxVolume}
+                    onChange={(e) =>
+                      setSettings({ ...settings, sfxVolume: parseFloat(e.target.value) })
+                    }
+                    className="w-32 accent-red-500"
+                  />
+                </div>
+                <div className="flex justify-between items-center pt-2 border-t border-gray-800">
+                  <span className="font-bold text-gray-300">Mute Audio</span>
+                  <button
+                    onClick={() => setSettings({ ...settings, muted: !settings.muted })}
+                    className={`px-3 py-1 rounded font-bold text-xs ${
+                      settings.muted ? 'bg-red-600 text-white' : 'bg-gray-700 text-gray-300'
+                    }`}
+                  >
+                    {settings.muted ? 'MUTED' : 'ACTIVE'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Display Section */}
+              <div className="bg-gray-900 p-4 rounded-lg border border-gray-800 space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-gray-300">Aspect Ratio</span>
+                  <select
+                    value={settings.aspectRatio}
+                    onChange={(e) =>
+                      setSettings({ ...settings, aspectRatio: e.target.value as any })
+                    }
+                    className="bg-gray-800 text-white px-2 py-1 rounded text-xs border border-gray-700"
+                  >
+                    <option value="auto">Auto Fullscreen</option>
+                    <option value="4_3">Original 4:3</option>
+                    <option value="16_9">Stretch 16:9</option>
+                  </select>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-gray-300">CRT Scanlines Filter</span>
+                  <button
+                    onClick={() =>
+                      setSettings({ ...settings, crtFilter: !settings.crtFilter })
+                    }
+                    className={`px-3 py-1 rounded font-bold text-xs ${
+                      settings.crtFilter ? 'bg-green-600 text-white' : 'bg-gray-700 text-gray-300'
+                    }`}
+                  >
+                    {settings.crtFilter ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-gray-300">Show FPS / Debug</span>
+                  <button
+                    onClick={() =>
+                      setSettings({ ...settings, showFPS: !settings.showFPS })
+                    }
+                    className={`px-3 py-1 rounded font-bold text-xs ${
+                      settings.showFPS ? 'bg-green-600 text-white' : 'bg-gray-700 text-gray-300'
+                    }`}
+                  >
+                    {settings.showFPS ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Touch Controls Section */}
+              <div className="bg-gray-900 p-4 rounded-lg border border-gray-800 flex justify-between items-center">
+                <span className="font-bold text-gray-300">Touch Controls</span>
+                <select
+                  value={settings.touchControls}
+                  onChange={(e) =>
+                    setSettings({ ...settings, touchControls: e.target.value as any })
+                  }
+                  className="bg-gray-800 text-white px-2 py-1 rounded text-xs border border-gray-700"
+                >
+                  <option value="auto">Auto Detect</option>
+                  <option value="always">Always On</option>
+                  <option value="never">Never</option>
+                </select>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setScreenState('menu')}
+              className="mt-6 bg-red-600 hover:bg-red-500 text-white px-8 py-2.5 rounded font-bold shadow transition"
+            >
+              BACK TO MENU
+            </button>
+          </div>
+        )}
+
+        {/* --- CONTROLS REMAPPING PANEL --- */}
+        {screenState === 'controls' && (
+          <div className="absolute inset-0 bg-gray-950/95 flex flex-col items-center justify-center p-6 z-30 max-w-lg mx-auto w-full overflow-y-auto">
+            <h2 className="text-2xl font-bold text-yellow-400 mb-4 tracking-wider">
+              CONTROLS CONFIG
+            </h2>
+
+            {remappingAction && (
+              <div className="bg-red-600 text-white px-4 py-2 rounded mb-4 text-xs font-bold animate-bounce">
+                PRESS ANY KEY FOR [{remappingAction.toUpperCase()}] ...
+              </div>
+            )}
+
+            <div className="w-full space-y-2 text-xs">
+              {Object.entries(settings.controls).map(([action, keys]) => (
+                <div
+                  key={action}
+                  className="bg-gray-900 p-3 rounded border border-gray-800 flex justify-between items-center"
+                >
+                  <span className="font-bold text-gray-300 tracking-wider">
+                    {action.toUpperCase()}
+                  </span>
+                  <div className="flex items-center space-x-2">
+                    <span className="bg-gray-800 text-yellow-400 px-2.5 py-1 rounded font-mono border border-gray-700">
+                      {keys.join(' / ')}
+                    </span>
+                    <button
+                      onClick={() => setRemappingAction(action as any)}
+                      className="bg-blue-600 hover:bg-blue-500 text-white px-2.5 py-1 rounded font-bold text-[10px]"
+                    >
+                      REMAP
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <button
+              onClick={() => setScreenState('menu')}
+              className="mt-6 bg-red-600 hover:bg-red-500 text-white px-8 py-2.5 rounded font-bold shadow transition"
+            >
+              BACK TO MENU
+            </button>
+          </div>
+        )}
+
+        {/* Fullscreen Button Bar */}
+        <div className="absolute top-3 right-3 z-20 flex items-center space-x-2">
+          <button
+            onClick={toggleFullscreen}
+            className="bg-black/60 hover:bg-black/80 active:bg-black text-white p-2 rounded border border-gray-600 text-xs font-bold backdrop-blur transition"
+            title="Toggle Fullscreen (F)"
+          >
+            {isFullscreen ? '⏹ EXIT FS' : '⛶ FULLSCREEN (F)'}
+          </button>
+        </div>
       </div>
 
-      {/* Touch Controls Overlay for Mobile Devices */}
-      {isMobile && (
-        <div className="w-full max-w-4xl flex items-center justify-between p-4 bg-gray-900 text-white border-t border-gray-800">
-          {/* D-Pad Controls */}
+      {/* --- SEMI-TRANSPARENT TOUCH CONTROLS FOR MOBILE / TOUCH --- */}
+      {showTouch && (
+        <div className="w-full max-w-4xl flex items-center justify-between p-4 bg-gray-950/80 backdrop-blur text-white border-t border-gray-800 z-20">
+          {/* Virtual D-Pad */}
           <div className="grid grid-cols-3 gap-2 w-36 h-36">
             <div />
             <button
-              onTouchStart={() => setKey('jump', true)}
-              onTouchEnd={() => setKey('jump', false)}
-              className="bg-gray-700 active:bg-gray-500 rounded flex items-center justify-center text-xl font-bold"
+              onTouchStart={() => setVirtualKey('jump', true)}
+              onTouchEnd={() => setVirtualKey('jump', false)}
+              onMouseDown={() => setVirtualKey('jump', true)}
+              onMouseUp={() => setVirtualKey('jump', false)}
+              className="bg-gray-800/80 active:bg-yellow-500/80 rounded flex items-center justify-center text-xl font-bold border border-gray-700 active:text-black"
             >
               ▲
             </button>
             <div />
             <button
-              onTouchStart={() => setKey('left', true)}
-              onTouchEnd={() => setKey('left', false)}
-              className="bg-gray-700 active:bg-gray-500 rounded flex items-center justify-center text-xl font-bold"
+              onTouchStart={() => setVirtualKey('left', true)}
+              onTouchEnd={() => setVirtualKey('left', false)}
+              onMouseDown={() => setVirtualKey('left', true)}
+              onMouseUp={() => setVirtualKey('left', false)}
+              className="bg-gray-800/80 active:bg-yellow-500/80 rounded flex items-center justify-center text-xl font-bold border border-gray-700 active:text-black"
             >
               ◀
             </button>
             <button
-              onTouchStart={() => setKey('down', true)}
-              onTouchEnd={() => setKey('down', false)}
-              className="bg-gray-700 active:bg-gray-500 rounded flex items-center justify-center text-xl font-bold"
+              onTouchStart={() => setVirtualKey('down', true)}
+              onTouchEnd={() => setVirtualKey('down', false)}
+              onMouseDown={() => setVirtualKey('down', true)}
+              onMouseUp={() => setVirtualKey('down', false)}
+              className="bg-gray-800/80 active:bg-yellow-500/80 rounded flex items-center justify-center text-xl font-bold border border-gray-700 active:text-black"
             >
               ▼
             </button>
             <button
-              onTouchStart={() => setKey('right', true)}
-              onTouchEnd={() => setKey('right', false)}
-              className="bg-gray-700 active:bg-gray-500 rounded flex items-center justify-center text-xl font-bold"
+              onTouchStart={() => setVirtualKey('right', true)}
+              onTouchEnd={() => setVirtualKey('right', false)}
+              onMouseDown={() => setVirtualKey('right', true)}
+              onMouseUp={() => setVirtualKey('right', false)}
+              className="bg-gray-800/80 active:bg-yellow-500/80 rounded flex items-center justify-center text-xl font-bold border border-gray-700 active:text-black"
             >
               ▶
             </button>
           </div>
 
-          {/* Action Buttons (A / B) */}
+          {/* Virtual A / B Action Buttons */}
           <div className="flex items-center space-x-4">
             <button
-              onTouchStart={() => setKey('run', true)}
-              onTouchEnd={() => setKey('run', false)}
-              className="w-16 h-16 bg-red-600 active:bg-red-400 rounded-full flex items-center justify-center font-bold text-lg shadow-lg"
+              onTouchStart={() => setVirtualKey('run', true)}
+              onTouchEnd={() => setVirtualKey('run', false)}
+              onMouseDown={() => setVirtualKey('run', true)}
+              onMouseUp={() => setVirtualKey('run', false)}
+              className="w-16 h-16 bg-red-600/80 active:bg-red-400 rounded-full flex items-center justify-center font-bold text-sm shadow-lg border-2 border-red-400"
             >
-              B / Fire
+              B (Run)
             </button>
             <button
-              onTouchStart={() => setKey('jump', true)}
-              onTouchEnd={() => setKey('jump', false)}
-              className="w-16 h-16 bg-yellow-500 active:bg-yellow-300 rounded-full flex items-center justify-center font-bold text-lg shadow-lg"
+              onTouchStart={() => setVirtualKey('jump', true)}
+              onTouchEnd={() => setVirtualKey('jump', false)}
+              onMouseDown={() => setVirtualKey('jump', true)}
+              onMouseUp={() => setVirtualKey('jump', false)}
+              className="w-16 h-16 bg-yellow-500/80 active:bg-yellow-300 rounded-full flex items-center justify-center font-bold text-sm shadow-lg border-2 border-yellow-300 text-black"
             >
-              A / Jump
+              A (Jump)
             </button>
           </div>
         </div>

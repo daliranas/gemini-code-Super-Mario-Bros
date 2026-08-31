@@ -17,13 +17,15 @@ import {
   TILE_QUESTION_STAR,
   TILE_USED_BLOCK,
   TILE_CASTLE_AXE,
-  TILE_CASTLE_BRIDGE,
   TILE_LAVA_TOP,
+  Biome,
 } from './MarioTypes';
-import { soundEngine } from './MarioAudio';
+import { soundEngine, BGMType } from './MarioAudio';
+import { getBiomeForChunk } from './MarioGenerator';
 
 export const GRAVITY = 0.0009; // px/ms^2
 export const MAX_FALL_SPEED = 0.4;
+export const FIXED_STEP_MS = 1000 / 60; // ~16.66ms per step
 
 export function getTileAt(
   x: number,
@@ -90,6 +92,13 @@ export function checkSolidCollision(
   return false;
 }
 
+export interface EngineUpdateResult {
+  cameraX: number;
+  stageCleared: boolean;
+  playerJustDied: boolean;
+  currentBiome: Biome;
+}
+
 export function updateEngine(
   dt: number,
   player: Player,
@@ -102,8 +111,24 @@ export function updateEngine(
   particles: Particle[],
   floatingTexts: FloatingText[],
   cameraX: number
-): { cameraX: number } {
-  if (dt > 50) dt = 50;
+): EngineUpdateResult {
+  // Cap frame delta time to prevent tunneling or huge physics jumps
+  if (dt > 100) dt = 100;
+
+  let stageCleared = false;
+  let playerJustDied = false;
+
+  const currentChunkIndex = Math.floor((cameraX + 128) / (CHUNK_WIDTH * TILE_SIZE));
+  const currentBiome = getBiomeForChunk(Math.max(0, currentChunkIndex));
+
+  // Dynamic BGM Updates
+  if (!player.dead) {
+    let expectedBGM: BGMType = currentBiome;
+    if (player.starTimer > 0) {
+      expectedBGM = 'starman';
+    }
+    soundEngine.playBGM(expectedBGM);
+  }
 
   // --- PLAYER UPDATE ---
   if (!player.dead) {
@@ -158,7 +183,7 @@ export function updateEngine(
     if (keys.jump && player.grounded && !player.crouching) {
       player.vy = -0.36;
       player.grounded = false;
-      soundEngine.playJump();
+      soundEngine.playJump(player.state !== 'small');
     }
 
     // Variable jump height
@@ -224,16 +249,17 @@ export function updateEngine(
         vy: -0.05,
         life: 1000,
       });
+      stageCleared = true;
     }
 
     // Check fall into abyss
     if (player.y > 240) {
       killPlayer(player);
+      playerJustDied = true;
     }
 
     // Fireball shooting
     if (keys.fire && player.state === 'fire' && fireballs.length < 2) {
-      // Fire single fireball
       fireballs.push({
         id: `fb_${Date.now()}_${Math.random()}`,
         x: player.direction === 1 ? player.x + player.width : player.x - 8,
@@ -243,7 +269,7 @@ export function updateEngine(
         width: 8,
         height: 8,
       });
-      keys.fire = false; // reset key state until re-pressed
+      keys.fire = false;
       soundEngine.playFireball();
     }
 
@@ -349,7 +375,6 @@ export function updateEngine(
         fb.y = Math.floor((fb.y + fb.height) / TILE_SIZE) * TILE_SIZE - fb.height - 0.05;
         fb.vy = -0.18;
       } else {
-        // Hit side wall -> explode
         createExplosionParticles(fb.x, fb.y, particles);
         fireballs.splice(i, 1);
         continue;
@@ -370,7 +395,6 @@ export function updateEngine(
         createExplosionParticles(fb.x, fb.y, particles);
         fireballs.splice(i, 1);
 
-        // Immunity check for Spiny and Buzzy Beetle
         if (e.type === 'spiny' || e.type === 'buzzy_beetle') {
           soundEngine.playBlockHit();
         } else if (e.type === 'bowser') {
@@ -386,7 +410,6 @@ export function updateEngine(
             }
           }
         } else {
-          // Defeat mob
           e.state = 'dead';
           e.vy = -0.2;
           soundEngine.playSquish();
@@ -418,7 +441,9 @@ export function updateEngine(
         player.y < bf.y + bf.height &&
         player.y + player.height > bf.y
       ) {
-        hurtPlayer(player);
+        if (hurtPlayer(player)) {
+          playerJustDied = true;
+        }
       }
     }
 
@@ -446,12 +471,9 @@ export function updateEngine(
       continue;
     }
 
-    // Distance check to activate AI
     if (e.x > cameraX + 320 || e.x < cameraX - 160) continue;
 
-    // Type-specific AI
     if (e.type === 'piranha') {
-      // Piranha Plant pipe emergence AI
       e.piranhaTimer = (e.piranhaTimer || 0) + dt;
       const playerNearPipe = Math.abs(player.x - (e.pipeX || 0)) < 32;
 
@@ -480,7 +502,6 @@ export function updateEngine(
 
       e.y = (e.pipeY || e.y) - (e.piranhaOffset || 0);
     } else if (e.type === 'lakitu') {
-      // Lakitu flying AI
       e.x += e.vx * dt;
       if (e.x < player.x - 80) e.vx = 0.04;
       if (e.x > player.x + 80) e.vx = -0.04;
@@ -488,7 +509,6 @@ export function updateEngine(
       e.shootTimer = (e.shootTimer || 0) + dt;
       if (e.shootTimer > 3000) {
         e.shootTimer = 0;
-        // Drop a Spiny
         enemies.push({
           id: `spiny_dropped_${Date.now()}`,
           type: 'spiny',
@@ -505,11 +525,9 @@ export function updateEngine(
         });
       }
     } else if (e.type === 'bowser') {
-      // Bowser AI
       e.shootTimer = (e.shootTimer || 0) + dt;
       e.jumpTimer = (e.jumpTimer || 0) + dt;
 
-      // Shoot flame every 2.5s
       if (e.shootTimer > 2500) {
         e.shootTimer = 0;
         bowserFlames.push({
@@ -523,13 +541,11 @@ export function updateEngine(
         });
       }
 
-      // Jump every 4s
       if (e.jumpTimer > 4000 && e.vy === 0) {
         e.jumpTimer = 0;
         e.vy = -0.25;
       }
 
-      // Apply Gravity
       e.vy += GRAVITY * dt;
       e.y += e.vy * dt;
       if (checkSolidCollision(e.x, e.y, e.width, e.height, chunks)) {
@@ -539,12 +555,10 @@ export function updateEngine(
         }
       }
 
-      // Turn to face player
       e.direction = player.x > e.x ? 1 : -1;
       e.vx = e.direction * 0.02;
       e.x += e.vx * dt;
     } else {
-      // Standard mobs (Goomba, Koopa, Spiny, Buzzy Beetle)
       e.vy += GRAVITY * dt;
       e.y += e.vy * dt;
 
@@ -559,7 +573,6 @@ export function updateEngine(
       e.vx = e.direction * currentSpd;
       e.x += e.vx * dt;
 
-      // Turn around on wall collision
       if (checkSolidCollision(e.x, e.y, e.width, e.height, chunks)) {
         if (e.vx > 0) {
           e.x = Math.floor((e.x + e.width) / TILE_SIZE) * TILE_SIZE - e.width - 0.05;
@@ -570,7 +583,6 @@ export function updateEngine(
         }
       }
 
-      // Moving shell knocking out other enemies
       if (e.state === 'shell_moving') {
         for (let j = 0; j < enemies.length; j++) {
           const other = enemies[j];
@@ -599,7 +611,6 @@ export function updateEngine(
       player.y + player.height > e.y
     ) {
       if (player.starTimer > 0) {
-        // Star Invincibility Instant Kill
         e.state = 'dead';
         e.vy = -0.2;
         soundEngine.playSquish();
@@ -613,10 +624,8 @@ export function updateEngine(
           life: 800,
         });
       } else if (player.vy > 0 && player.y + player.height - player.vy * dt <= e.y + 8) {
-        // Jumped on top of enemy
         if (e.type === 'spiny') {
-          // Cannot jump on Spiny!
-          hurtPlayer(player);
+          if (hurtPlayer(player)) playerJustDied = true;
         } else if (e.type === 'goomba') {
           e.state = 'squished';
           e.deadTimer = 400;
@@ -632,7 +641,7 @@ export function updateEngine(
             e.state = 'shell_moving';
             e.direction = player.x < e.x ? 1 : -1;
             player.vy = -0.25;
-            soundEngine.playSquish();
+            soundEngine.playKick();
           } else if (e.state === 'shell_moving') {
             e.state = 'shell_idle';
             player.vy = -0.25;
@@ -640,14 +649,12 @@ export function updateEngine(
           }
         }
       } else {
-        // Hit side/bottom of enemy
         if (e.state === 'shell_idle') {
-          // Kick shell
           e.state = 'shell_moving';
           e.direction = player.x < e.x ? 1 : -1;
-          soundEngine.playSquish();
+          soundEngine.playKick();
         } else if (player.iframeTimer <= 0) {
-          hurtPlayer(player);
+          if (hurtPlayer(player)) playerJustDied = true;
         }
       }
     }
@@ -671,7 +678,12 @@ export function updateEngine(
     if (ft.life <= 0) floatingTexts.splice(i, 1);
   }
 
-  return { cameraX };
+  return {
+    cameraX,
+    stageCleared,
+    playerJustDied,
+    currentBiome,
+  };
 }
 
 function handleBlockHit(
@@ -736,16 +748,20 @@ function handleBlockHit(
   }
 }
 
-function hurtPlayer(player: Player) {
-  soundEngine.playHurt();
+function hurtPlayer(player: Player): boolean {
   if (player.state === 'fire') {
     player.state = 'super';
     player.iframeTimer = 2000;
+    soundEngine.playHurt();
+    return false;
   } else if (player.state === 'super') {
     player.state = 'small';
     player.iframeTimer = 2000;
+    soundEngine.playHurt();
+    return false;
   } else {
     killPlayer(player);
+    return true;
   }
 }
 
@@ -754,6 +770,7 @@ function killPlayer(player: Player) {
   player.deathTimer = 2000;
   player.vy = -0.3;
   player.lives -= 1;
+  soundEngine.playJingle('death');
 }
 
 function createCoinParticle(x: number, y: number, particles: Particle[]) {
