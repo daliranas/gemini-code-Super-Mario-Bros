@@ -125,6 +125,13 @@ export const MarioGame: React.FC = () => {
     };
   }
 
+  // Ensure Audio Cleanup on React Component Unmount
+  useEffect(() => {
+    return () => {
+      soundEngine.stopBGM();
+    };
+  }, []);
+
   // Load Settings and High Score from LocalStorage
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -171,7 +178,6 @@ export const MarioGame: React.FC = () => {
       sfxVolume: settings.sfxVolume,
       muted: settings.muted,
     });
-    // Persist settings
     try {
       localStorage.setItem(MARIO_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
     } catch (e) {
@@ -205,9 +211,19 @@ export const MarioGame: React.FC = () => {
     }
   };
 
+  // Switch Screen State with Clean BGM Shutdown
+  const navigateToScreen = (screen: ScreenState) => {
+    soundEngine.initAudio();
+    if (screen === 'menu' || screen === 'settings' || screen === 'controls') {
+      soundEngine.stopBGM();
+    }
+    setScreenState(screen);
+  };
+
   // Start new game session
   const startNewGame = (mode: GameMode) => {
     soundEngine.initAudio();
+    soundEngine.stopBGM();
     setGameMode(mode);
     setGameTime(400);
 
@@ -264,7 +280,6 @@ export const MarioGame: React.FC = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       soundEngine.initAudio();
 
-      // If key remapping in progress
       if (remappingAction) {
         e.preventDefault();
         setSettings((prev) => ({
@@ -280,14 +295,12 @@ export const MarioGame: React.FC = () => {
 
       const ctrl = settings.controls;
 
-      // Fullscreen key
       if (ctrl.fullscreen.includes(e.code)) {
         e.preventDefault();
         toggleFullscreen();
         return;
       }
 
-      // Pause key
       if (ctrl.pause.includes(e.code)) {
         e.preventDefault();
         if (screenState === 'playing') {
@@ -360,7 +373,6 @@ export const MarioGame: React.FC = () => {
       const dt = now - lastTime;
       lastTime = now;
 
-      // FPS Calculation
       frameCounter++;
       fpsTimeCounter += dt;
       if (fpsTimeCounter >= 1000) {
@@ -372,13 +384,11 @@ export const MarioGame: React.FC = () => {
       if (screenState === 'playing') {
         const state = gameStateRef.current;
 
-        // Game Timer Countdown
         timerCounter += dt;
         if (timerCounter >= 1000) {
           timerCounter -= 1000;
           setGameTime((prev) => {
             if (prev <= 1) {
-              // Time's up -> kill player
               state.player.dead = true;
               state.player.deathTimer = 2000;
               state.player.vy = -0.3;
@@ -390,7 +400,6 @@ export const MarioGame: React.FC = () => {
           });
         }
 
-        // Generate chunk ahead
         const currentMarioChunk = Math.floor(state.player.x / (16 * TILE_SIZE));
         while (state.highestGeneratedChunk < currentMarioChunk + 4) {
           state.highestGeneratedChunk++;
@@ -399,7 +408,6 @@ export const MarioGame: React.FC = () => {
           state.enemies.push(...data.enemies);
         }
 
-        // Update Physics Engine
         const res = updateEngine(
           dt,
           state.player,
@@ -415,22 +423,17 @@ export const MarioGame: React.FC = () => {
         );
         state.cameraX = res.cameraX;
 
-        // Check High Score
         checkAndSaveHighScore(state.player.score);
 
-        // Stage Clear Handling
         if (res.stageCleared) {
           soundEngine.stopBGM();
           soundEngine.playJingle('level_clear', () => {
-            // Next stage / victory restart
             startNewGame(gameMode);
           });
         }
 
-        // Death & Respawn / Game Over
         if (state.player.dead && state.player.deathTimer <= 0) {
           if (state.player.lives > 0) {
-            // Respawn
             state.player.dead = false;
             state.player.x = state.cameraX + 32;
             state.player.y = 176;
@@ -442,14 +445,12 @@ export const MarioGame: React.FC = () => {
             setStageIntroTimer(2);
             setScreenState('stage_intro');
           } else {
-            // Game Over
             soundEngine.stopBGM();
             soundEngine.playJingle('game_over');
             setScreenState('game_over');
           }
         }
 
-        // Memory Pruning
         const pruned = pruneFarObjects(
           state.chunks,
           state.enemies,
@@ -459,7 +460,6 @@ export const MarioGame: React.FC = () => {
         state.enemies = pruned.enemies;
         state.powerUps = pruned.powerUps;
 
-        // Render Frame
         render(
           ctx,
           state.player,
@@ -476,7 +476,6 @@ export const MarioGame: React.FC = () => {
           settings.showFPS ? fps : undefined
         );
       } else {
-        // Render menu or static background preview when paused
         const state = gameStateRef.current;
         render(
           ctx,
@@ -515,17 +514,15 @@ export const MarioGame: React.FC = () => {
     floatingTexts: FloatingText[],
     biome: Biome,
     timeRemaining: number,
-    fpsValue?: number
+    fpsVal?: number
   ) => {
     ctx.imageSmoothingEnabled = false;
 
-    // Sky Background
     let skyColor = '#5c94fc';
     if (biome === 'underground' || biome === 'castle') skyColor = '#000000';
     ctx.fillStyle = skyColor;
     ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    // Parallax Clouds in Overworld
     if (biome === 'overworld') {
       ctx.fillStyle = '#ffffff';
       const cloud1X = (50 - cameraX * 0.3) % 400;
@@ -537,7 +534,6 @@ export const MarioGame: React.FC = () => {
       ctx.fillRect(cloud2X + 12, 40, 24, 10);
     }
 
-    // Chunks & Tiles
     chunks.forEach((chunk) => {
       const chunkX = chunk.startX - cameraX;
       if (chunkX + 256 < 0 || chunkX > SCREEN_WIDTH) return;
@@ -552,13 +548,11 @@ export const MarioGame: React.FC = () => {
       }
     });
 
-    // Entities
     powerUps.forEach((p) => drawPowerUp(ctx, p, cameraX));
     enemies.forEach((e) => drawEnemy(ctx, e, cameraX));
     fireballs.forEach((fb) => drawFireball(ctx, fb, cameraX));
     bowserFlames.forEach((bf) => drawBowserFlame(ctx, bf, cameraX));
 
-    // Particles & Floating Text
     particles.forEach((pt) => {
       ctx.fillStyle = pt.color;
       ctx.fillRect(pt.x - cameraX, pt.y, pt.size, pt.size);
@@ -570,11 +564,8 @@ export const MarioGame: React.FC = () => {
       ctx.fillText(ft.text, ft.x - cameraX, ft.y);
     });
 
-    // Player
     drawPlayer(ctx, player, cameraX);
-
-    // NES HUD
-    drawHUD(ctx, player, biome, timeRemaining, fpsValue);
+    drawHUD(ctx, player, biome, timeRemaining, fpsVal);
   };
 
   const drawTile = (
@@ -888,13 +879,11 @@ export const MarioGame: React.FC = () => {
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 9px monospace';
 
-    // Line 1 Labels
     ctx.fillText('MARIO', 12, 14);
     ctx.fillText('WORLD', 105, 14);
     ctx.fillText('TIME', 170, 14);
     ctx.fillText('LIVES', 215, 14);
 
-    // Line 2 Values
     const scoreStr = player.score.toString().padStart(6, '0');
     const coinsStr = `$x${player.coins.toString().padStart(2, '0')}`;
     const worldStr = biome === 'overworld' ? '1-1' : biome === 'underground' ? '1-2' : '1-4';
@@ -911,7 +900,6 @@ export const MarioGame: React.FC = () => {
     }
   };
 
-  // Dynamic aspect ratio container styling
   const getContainerAspectClass = () => {
     if (settings.aspectRatio === '16_9') return 'aspect-[16/9]';
     if (settings.aspectRatio === '4_3') return 'aspect-[4/3]';
@@ -927,18 +915,15 @@ export const MarioGame: React.FC = () => {
       ref={containerRef}
       className="relative flex flex-col items-center justify-center w-full h-full min-h-screen bg-black text-white select-none overflow-hidden font-mono"
     >
-      {/* Aspect-Ratio Adaptive Canvas Wrapper with Letterboxing */}
       <div
         className={`relative flex items-center justify-center bg-black shadow-2xl border-2 border-gray-800 rounded-lg overflow-hidden max-w-6xl w-full ${getContainerAspectClass()}`}
       >
-        {/* Canvas Element */}
         <canvas
           ref={canvasRef}
           className="w-full h-full object-contain"
           style={{ imageRendering: 'pixelated' }}
         />
 
-        {/* CRT Scanline Filter Overlay */}
         {settings.crtFilter && (
           <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,_rgba(0,0,0,0.25)_50%)] bg-[length:100%_4px] pointer-events-none z-10 opacity-70" />
         )}
@@ -946,7 +931,6 @@ export const MarioGame: React.FC = () => {
         {/* --- RETRO MAIN MENU OVERLAY --- */}
         {screenState === 'menu' && (
           <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center p-6 z-20 text-center">
-            {/* Animated Title Logo */}
             <div className="mb-8 transform hover:scale-105 transition-transform">
               <h1 className="text-4xl sm:text-6xl font-black tracking-widest text-red-600 drop-shadow-[0_4px_0_rgba(255,255,255,0.8)] animate-pulse">
                 SUPER MARIO
@@ -956,12 +940,10 @@ export const MarioGame: React.FC = () => {
               </p>
             </div>
 
-            {/* High Score Banner */}
             <div className="mb-6 bg-yellow-500/20 text-yellow-300 border border-yellow-500/50 px-4 py-1.5 rounded-full text-xs sm:text-sm font-bold tracking-wider">
               HIGH SCORE - {highScore.toString().padStart(6, '0')}
             </div>
 
-            {/* Mode Selector Buttons */}
             <div className="flex flex-col space-y-3 w-64">
               <button
                 onClick={() => startNewGame('classic')}
@@ -976,13 +958,13 @@ export const MarioGame: React.FC = () => {
                 ENDLESS RUNNER
               </button>
               <button
-                onClick={() => setScreenState('settings')}
+                onClick={() => navigateToScreen('settings')}
                 className="w-full bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white py-3 rounded-lg font-bold tracking-widest shadow-lg border-b-4 border-blue-800 transition"
               >
                 SETTINGS
               </button>
               <button
-                onClick={() => setScreenState('controls')}
+                onClick={() => navigateToScreen('controls')}
                 className="w-full bg-gray-700 hover:bg-gray-600 active:bg-gray-800 text-white py-3 rounded-lg font-bold tracking-widest shadow-lg border-b-4 border-gray-900 transition"
               >
                 CONTROLS
@@ -1019,7 +1001,7 @@ export const MarioGame: React.FC = () => {
                 RESUME
               </button>
               <button
-                onClick={() => setScreenState('settings')}
+                onClick={() => navigateToScreen('settings')}
                 className="w-full bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded font-bold shadow transition"
               >
                 SETTINGS
@@ -1031,10 +1013,7 @@ export const MarioGame: React.FC = () => {
                 RESTART
               </button>
               <button
-                onClick={() => {
-                  soundEngine.stopBGM();
-                  setScreenState('menu');
-                }}
+                onClick={() => navigateToScreen('menu')}
                 className="w-full bg-red-600 hover:bg-red-500 text-white py-2.5 rounded font-bold shadow transition"
               >
                 QUIT TO MENU
@@ -1060,7 +1039,7 @@ export const MarioGame: React.FC = () => {
                 TRY AGAIN
               </button>
               <button
-                onClick={() => setScreenState('menu')}
+                onClick={() => navigateToScreen('menu')}
                 className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-2.5 rounded font-bold shadow transition"
               >
                 MAIN MENU
@@ -1077,7 +1056,6 @@ export const MarioGame: React.FC = () => {
             </h2>
 
             <div className="w-full space-y-5 text-sm">
-              {/* Audio Section */}
               <div className="bg-gray-900 p-4 rounded-lg border border-gray-800 space-y-3">
                 <div className="flex justify-between items-center">
                   <span className="font-bold text-gray-300">Master Volume</span>
@@ -1134,7 +1112,6 @@ export const MarioGame: React.FC = () => {
                 </div>
               </div>
 
-              {/* Display Section */}
               <div className="bg-gray-900 p-4 rounded-lg border border-gray-800 space-y-3">
                 <div className="flex justify-between items-center">
                   <span className="font-bold text-gray-300">Aspect Ratio</span>
@@ -1178,7 +1155,6 @@ export const MarioGame: React.FC = () => {
                 </div>
               </div>
 
-              {/* Touch Controls Section */}
               <div className="bg-gray-900 p-4 rounded-lg border border-gray-800 flex justify-between items-center">
                 <span className="font-bold text-gray-300">Touch Controls</span>
                 <select
@@ -1196,7 +1172,7 @@ export const MarioGame: React.FC = () => {
             </div>
 
             <button
-              onClick={() => setScreenState('menu')}
+              onClick={() => navigateToScreen('menu')}
               className="mt-6 bg-red-600 hover:bg-red-500 text-white px-8 py-2.5 rounded font-bold shadow transition"
             >
               BACK TO MENU
@@ -1242,7 +1218,7 @@ export const MarioGame: React.FC = () => {
             </div>
 
             <button
-              onClick={() => setScreenState('menu')}
+              onClick={() => navigateToScreen('menu')}
               className="mt-6 bg-red-600 hover:bg-red-500 text-white px-8 py-2.5 rounded font-bold shadow transition"
             >
               BACK TO MENU
@@ -1265,7 +1241,6 @@ export const MarioGame: React.FC = () => {
       {/* --- SEMI-TRANSPARENT TOUCH CONTROLS FOR MOBILE / TOUCH --- */}
       {showTouch && (
         <div className="w-full max-w-4xl flex items-center justify-between p-4 bg-gray-950/80 backdrop-blur text-white border-t border-gray-800 z-20">
-          {/* Virtual D-Pad */}
           <div className="grid grid-cols-3 gap-2 w-36 h-36">
             <div />
             <button
@@ -1307,7 +1282,6 @@ export const MarioGame: React.FC = () => {
             </button>
           </div>
 
-          {/* Virtual A / B Action Buttons */}
           <div className="flex items-center space-x-4">
             <button
               onTouchStart={() => setVirtualKey('run', true)}

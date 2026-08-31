@@ -475,7 +475,7 @@ export function updateEngine(
 
     if (e.type === 'piranha') {
       e.piranhaTimer = (e.piranhaTimer || 0) + dt;
-      const playerNearPipe = Math.abs(player.x - (e.pipeX || 0)) < 32;
+      const playerNearPipe = Math.abs((player.x + player.width / 2) - ((e.pipeX || e.x) + 8)) < 36;
 
       if (e.piranhaState === 'up') {
         if ((e.piranhaOffset || 0) < 24) {
@@ -494,6 +494,7 @@ export function updateEngine(
           e.piranhaTimer = 0;
         }
       } else if (e.piranhaState === 'waiting') {
+        // Do NOT emerge if player is in close proximity to the pipe!
         if (!playerNearPipe && (e.piranhaTimer || 0) > 1500) {
           e.piranhaState = 'up';
           e.piranhaTimer = 0;
@@ -603,58 +604,86 @@ export function updateEngine(
     }
 
     // --- PLAYER & ENEMY COLLISION ---
-    if (
-      !player.dead &&
-      player.x < e.x + e.width &&
-      player.x + player.width > e.x &&
-      player.y < e.y + e.height &&
-      player.y + player.height > e.y
-    ) {
-      if (player.starTimer > 0) {
-        e.state = 'dead';
-        e.vy = -0.2;
-        soundEngine.playSquish();
-        player.score += 400;
-        floatingTexts.push({
-          id: `ft_star_${Date.now()}`,
-          text: '400',
-          x: e.x,
-          y: e.y - 10,
-          vy: -0.05,
-          life: 800,
-        });
-      } else if (player.vy > 0 && player.y + player.height - player.vy * dt <= e.y + 8) {
-        if (e.type === 'spiny') {
-          if (hurtPlayer(player)) playerJustDied = true;
-        } else if (e.type === 'goomba') {
-          e.state = 'squished';
-          e.deadTimer = 400;
-          player.vy = -0.25;
-          soundEngine.playSquish();
-          player.score += 100;
-        } else if (e.type === 'koopa_green' || e.type === 'koopa_red' || e.type === 'buzzy_beetle') {
-          if (e.state === 'walking') {
-            e.state = 'shell_idle';
-            player.vy = -0.25;
-            soundEngine.playSquish();
-          } else if (e.state === 'shell_idle') {
-            e.state = 'shell_moving';
-            e.direction = player.x < e.x ? 1 : -1;
-            player.vy = -0.25;
-            soundEngine.playKick();
-          } else if (e.state === 'shell_moving') {
-            e.state = 'shell_idle';
-            player.vy = -0.25;
-            soundEngine.playSquish();
+    if (!player.dead) {
+      let isColliding = false;
+
+      if (e.type === 'piranha') {
+        // Piranha Plant specific hitbox check:
+        // Only active when plant is emerging above pipe top!
+        const offset = e.piranhaOffset || 0;
+        if (offset > 2 && e.piranhaState !== 'waiting') {
+          const pipeY = e.pipeY || e.y + offset;
+          const visibleTop = pipeY - offset;
+          const visibleBottom = pipeY;
+
+          if (
+            player.x < e.x + e.width &&
+            player.x + player.width > e.x &&
+            player.y < visibleBottom &&
+            player.y + player.height > visibleTop
+          ) {
+            isColliding = true;
           }
         }
       } else {
-        if (e.state === 'shell_idle') {
-          e.state = 'shell_moving';
-          e.direction = player.x < e.x ? 1 : -1;
-          soundEngine.playKick();
-        } else if (player.iframeTimer <= 0) {
-          if (hurtPlayer(player)) playerJustDied = true;
+        // Standard enemy bounding box check
+        if (
+          player.x < e.x + e.width &&
+          player.x + player.width > e.x &&
+          player.y < e.y + e.height &&
+          player.y + player.height > e.y
+        ) {
+          isColliding = true;
+        }
+      }
+
+      if (isColliding) {
+        if (player.starTimer > 0) {
+          e.state = 'dead';
+          e.vy = -0.2;
+          soundEngine.playSquish();
+          player.score += 400;
+          floatingTexts.push({
+            id: `ft_star_${Date.now()}`,
+            text: '400',
+            x: e.x,
+            y: e.y - 10,
+            vy: -0.05,
+            life: 800,
+          });
+        } else if (player.vy > 0 && player.y + player.height - player.vy * dt <= e.y + 8 && e.type !== 'piranha') {
+          if (e.type === 'spiny') {
+            if (hurtPlayer(player)) playerJustDied = true;
+          } else if (e.type === 'goomba') {
+            e.state = 'squished';
+            e.deadTimer = 400;
+            player.vy = -0.25;
+            soundEngine.playSquish();
+            player.score += 100;
+          } else if (e.type === 'koopa_green' || e.type === 'koopa_red' || e.type === 'buzzy_beetle') {
+            if (e.state === 'walking') {
+              e.state = 'shell_idle';
+              player.vy = -0.25;
+              soundEngine.playSquish();
+            } else if (e.state === 'shell_idle') {
+              e.state = 'shell_moving';
+              e.direction = player.x < e.x ? 1 : -1;
+              player.vy = -0.25;
+              soundEngine.playKick();
+            } else if (e.state === 'shell_moving') {
+              e.state = 'shell_idle';
+              player.vy = -0.25;
+              soundEngine.playSquish();
+            }
+          }
+        } else {
+          if (e.state === 'shell_idle') {
+            e.state = 'shell_moving';
+            e.direction = player.x < e.x ? 1 : -1;
+            soundEngine.playKick();
+          } else if (player.iframeTimer <= 0) {
+            if (hurtPlayer(player)) playerJustDied = true;
+          }
         }
       }
     }
