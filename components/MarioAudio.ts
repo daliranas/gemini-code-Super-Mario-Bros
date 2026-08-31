@@ -97,6 +97,7 @@ export class SoundEngine {
   private currentBGM: BGMType = null;
   private bgmTimeoutId: number | null = null;
   private isJinglePlaying: boolean = false;
+  private activeOscillators: OscillatorNode[] = [];
 
   private masterVolume: number = 0.8;
   private musicVolume: number = 0.7;
@@ -140,8 +141,8 @@ export class SoundEngine {
     const effectiveMaster = this.isMuted ? 0 : this.masterVolume;
 
     this.masterGain.gain.setValueAtTime(effectiveMaster, now);
-    this.musicGain.gain.setValueAtTime(this.musicVolume * 0.35, now); // BGM gain scaling
-    this.sfxGain.gain.setValueAtTime(this.sfxVolume * 0.5, now);     // SFX gain scaling
+    this.musicGain.gain.setValueAtTime(this.musicVolume * 0.35, now);
+    this.sfxGain.gain.setValueAtTime(this.sfxVolume * 0.5, now);
   }
 
   // --- BGM TRACK PLAYER ---
@@ -150,13 +151,15 @@ export class SoundEngine {
     if (this.currentBGM === bgm && this.bgmTimeoutId !== null) return;
 
     this.stopBGM();
+
+    if (!bgm) return;
     this.currentBGM = bgm;
 
-    if (!bgm || this.isJinglePlaying) return;
+    if (this.isJinglePlaying) return;
 
     let melody: Note[] = [];
     let bass: Note[] = [];
-    let tempoMs = 120; // 1/16th note duration in ms
+    let tempoMs = 120;
 
     switch (bgm) {
       case 'overworld':
@@ -184,7 +187,6 @@ export class SoundEngine {
       const now = this.ctx.currentTime;
       let noteOffset = 0;
 
-      // Play melody line
       melody.forEach((note) => {
         const startTime = now + (noteOffset * tempoMs) / 1000;
         const durationSec = (note.duration * tempoMs) / 1000 * 0.9;
@@ -195,7 +197,6 @@ export class SoundEngine {
         noteOffset += note.duration;
       });
 
-      // Play bass line if present
       let bassOffset = 0;
       bass.forEach((note) => {
         const startTime = now + (bassOffset * tempoMs) / 1000;
@@ -219,7 +220,19 @@ export class SoundEngine {
       clearTimeout(this.bgmTimeoutId);
       this.bgmTimeoutId = null;
     }
+
+    // Immediately stop and disconnect all running oscillators
+    for (const osc of this.activeOscillators) {
+      try {
+        osc.stop();
+        osc.disconnect();
+      } catch (e) {
+        // Ignored if already stopped
+      }
+    }
+    this.activeOscillators = [];
     this.currentBGM = null;
+    this.isJinglePlaying = false;
   }
 
   // --- JINGLE PLAYER ---
@@ -281,6 +294,15 @@ export class SoundEngine {
 
     osc.connect(g);
     g.connect(gainNode);
+
+    this.activeOscillators.push(osc);
+
+    osc.onended = () => {
+      const idx = this.activeOscillators.indexOf(osc);
+      if (idx !== -1) {
+        this.activeOscillators.splice(idx, 1);
+      }
+    };
 
     osc.start(startTime);
     osc.stop(startTime + durationSec);
