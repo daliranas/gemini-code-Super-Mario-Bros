@@ -21,6 +21,17 @@ export type EnemyState =
 
 export type PowerUpType = 'mushroom' | 'flower' | 'star';
 
+export type ScreenState =
+  | 'menu'
+  | 'stage_intro'
+  | 'playing'
+  | 'paused'
+  | 'game_over'
+  | 'settings'
+  | 'controls';
+
+export type GameMode = 'classic' | 'endless';
+
 export const SCREEN_WIDTH = 256;
 export const SCREEN_HEIGHT = 240;
 export const TILE_SIZE = 16;
@@ -162,3 +173,50 @@ export interface KeysState {
   run: boolean;
   fire: boolean;
 }
+
+export interface KeyBindings {
+  left: string[];
+  right: string[];
+  down: string[];
+  jump: string[];
+  run: string[];
+  pause: string[];
+  fullscreen: string[];
+}
+
+export interface GameSettings {
+  masterVolume: number; // 0.0 - 1.0
+  musicVolume: number;  // 0.0 - 1.0
+  sfxVolume: number;    // 0.0 - 1.0
+  muted: boolean;
+  aspectRatio: 'auto' | '16_9' | '4_3';
+  crtFilter: boolean;
+  showFPS: boolean;
+  touchControls: 'auto' | 'always' | 'never';
+  controls: KeyBindings;
+}
+
+export const DEFAULT_KEY_BINDINGS: KeyBindings = {
+  left: ['ArrowLeft', 'KeyA'],
+  right: ['ArrowRight', 'KeyD'],
+  down: ['ArrowDown', 'KeyS'],
+  jump: ['ArrowUp', 'KeyW', 'Space'],
+  run: ['ShiftLeft', 'ShiftRight', 'KeyK'],
+  pause: ['Escape', 'KeyP'],
+  fullscreen: ['KeyF'],
+};
+
+export const DEFAULT_SETTINGS: GameSettings = {
+  masterVolume: 0.8,
+  musicVolume: 0.7,
+  sfxVolume: 0.9,
+  muted: false,
+  aspectRatio: 'auto',
+  crtFilter: true,
+  showFPS: false,
+  touchControls: 'auto',
+  controls: DEFAULT_KEY_BINDINGS,
+};
+
+export const MARIO_SETTINGS_STORAGE_KEY = 'super_mario_retro_settings';
+export const MARIO_HIGHSCORE_STORAGE_KEY = 'super_mario_retro_highscore';
